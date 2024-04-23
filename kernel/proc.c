@@ -33,7 +33,7 @@ void
 proc_mapstacks(pagetable_t kpgtbl)
 {
   struct proc *p;
-  
+
   for(p = proc; p < &proc[NPROC]; p++) {
     char *pa = kalloc();
     if(pa == 0)
@@ -48,7 +48,7 @@ void
 procinit(void)
 {
   struct proc *p;
-  
+
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
@@ -93,7 +93,7 @@ int
 allocpid()
 {
   int pid;
-  
+
   acquire(&pid_lock);
   pid = nextpid;
   nextpid = nextpid + 1;
@@ -124,6 +124,10 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->period = 0;
+  p->runtime = 0;
+  p->deadline = 0;
+  p->thisperiodstart = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -236,7 +240,7 @@ userinit(void)
 
   p = allocproc();
   initproc = p;
-  
+
   // allocate one user page and copy initcode's instructions
   // and data into it.
   uvmfirst(p->pagetable, initcode, sizeof(initcode));
@@ -372,7 +376,7 @@ exit(int status)
 
   // Parent might be sleeping in wait().
   wakeup(p->parent);
-  
+
   acquire(&p->lock);
 
   p->xstate = status;
@@ -428,10 +432,36 @@ wait(uint64 addr)
       release(&wait_lock);
       return -1;
     }
-    
+
     // Wait for a child to exit.
     sleep(p, &wait_lock);  //DOC: wait-sleep
   }
+}
+
+struct proc *
+find_earlest_deadline(int lastrun)
+{
+  struct proc *p;
+  struct proc *edp = 0;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if (p->state == RUNNABLE && p->runtime && p->thisperiodstart <= ticks) {
+        if (edp == 0)
+          edp = p;
+        else if (p->deadline < edp->deadline)
+          edp = p;
+        else if (p->deadline == edp->deadline)
+        {
+          if (lastrun == p->pid)
+            edp = p;
+          else if (p->pid < edp->pid)
+            edp = p;
+        }
+      }
+      release(&p->lock);
+  }
+  return edp;
 }
 
 // Per-CPU process scheduler.
@@ -446,15 +476,30 @@ scheduler(void)
 {
   struct proc *p;
   struct cpu *c = mycpu();
-  
+  int lastrun = 0;
+
   c->proc = 0;
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
 
     for(p = proc; p < &proc[NPROC]; p++) {
+      struct proc *edp = find_earlest_deadline(lastrun);
+      if (edp != 0)
+      {
+        acquire(&edp->lock);
+        edp->state = RUNNING;
+        c->proc = edp;
+        swtch(&c->context, &edp->context);
+
+        c->proc = 0;
+        lastrun = edp->pid;
+        release(&edp->lock);
+        p--;
+        continue;
+      }
       acquire(&p->lock);
-      if(p->state == RUNNABLE) {
+      if(p->state == RUNNABLE && p->runtime == 0) {
         // Switch to chosen process.  It is the process's job
         // to release its lock and then reacquire it
         // before jumping back to us.
@@ -465,6 +510,7 @@ scheduler(void)
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;
+        lastrun = p->pid;
       }
       release(&p->lock);
     }
@@ -536,7 +582,7 @@ void
 sleep(void *chan, struct spinlock *lk)
 {
   struct proc *p = myproc();
-  
+
   // Must acquire p->lock in order to
   // change p->state and then call sched.
   // Once we hold p->lock, we can be
@@ -615,7 +661,7 @@ int
 killed(struct proc *p)
 {
   int k;
-  
+
   acquire(&p->lock);
   k = p->killed;
   release(&p->lock);

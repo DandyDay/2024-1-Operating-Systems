@@ -6,6 +6,8 @@
 #include "spinlock.h"
 #include "proc.h"
 
+extern struct proc proc[NPROC];
+
 uint64
 sys_exit(void)
 {
@@ -92,7 +94,7 @@ sys_uptime(void)
 
 #ifdef SNU
 /* Do not touch sys_time() */
-uint64 
+uint64
 sys_time(void)
 {
   uint64 x;
@@ -103,15 +105,41 @@ sys_time(void)
 /* Do not touch sys_time() */
 
 uint64
-sys_sched_setattr(void)
+sys_sched_setattr()
 {
   // FILL HERE
+  int pid;
+  int runtime;
+  int period;
 
+  argint(0, &pid);
+  argint(1, &runtime);
+  argint(2, &period);
 
+  if (runtime <= 0 || period <= 0 || runtime >= period)
+    return -1;
+  if (pid == 0)
+    pid = myproc()->pid;
+  struct proc *p;
+  for(p = proc; p < &proc[NPROC]; p++) {
+    acquire(&p->lock);
+    if(p->pid == pid) {
+      goto found;
+    } else {
+      release(&p->lock);
+    }
+  }
+  return -1;
 
+found:
+  p->runtime = runtime;
+  p->period = period;
+  acquire(&tickslock);
+  p->thisperiodstart = ticks;
+  p->deadline = ticks + period;
+  release(&tickslock);
 
-
-
+  release(&p->lock);
   return 0;
 }
 
@@ -119,7 +147,15 @@ uint64
 sys_sched_yield(void)
 {
   // MODIFY THIS
-  
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  if (p->runtime != 0 || p->period != 0)
+  {
+    p->thisperiodstart += p->period;
+    p->deadline += p->period;
+  }
+  release(&p->lock);
+
   yield();
 
   return 0;
