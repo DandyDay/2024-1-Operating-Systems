@@ -25,6 +25,8 @@
 #define BACKSPACE 0x100
 #define C(x)  ((x)-'@')  // Control-x
 
+uint64 kbdints = 0;
+
 //
 // send one character to the uart.
 // called by printf(), and to echo input characters,
@@ -43,7 +45,7 @@ consputc(int c)
 
 struct {
   struct spinlock lock;
-  
+
   // input
 #define INPUT_BUF_SIZE 128
   char buf[INPUT_BUF_SIZE];
@@ -174,7 +176,9 @@ consoleintr(int c)
     }
     break;
   }
-  
+
+  ++kbdints;
+
   release(&cons.lock);
 }
 

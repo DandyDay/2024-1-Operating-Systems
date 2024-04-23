@@ -6,6 +6,8 @@
 #include "spinlock.h"
 #include "proc.h"
 
+extern uint64 kbdints;
+
 uint64
 sys_exit(void)
 {
@@ -88,4 +90,19 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+
+int sys_kbdints(void)
+{
+  return kbdints;
+}
+
+extern uint64 readtime();
+
+uint64 sys_time(void)
+{
+  uint64 time;
+  asm volatile("ecall");
+  asm volatile("mv %0, a0" : "=r"(time) : : "memory");
+  return time;
 }
