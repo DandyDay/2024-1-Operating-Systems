@@ -11,11 +11,18 @@
 //
 //----------------------------------------------------------------
 
-#ifdef SNU
-#include "types.h"
+// #ifdef SNU
+
 
 extern int freemem;
 
+uint64 xxh64(void *input, unsigned int len);
 
+struct merged_page_list {
+  pte_t  *pte;
+  uint64 pa;
+  uint64 refcnt;
+  uint64 hash;
+};
 
-#endif
+// #endif

@@ -5,6 +5,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "ksm.h"
 
 /*
  * the kernel's page table.
@@ -14,6 +15,12 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+
+#ifdef SNU
+extern void *zeropage;
+extern uint64 zp_refcnt;   //zeropage reference count
+extern struct merged_page_list mlist[NMLIST];
+#endif
 
 // Make a direct-map page table for the kernel.
 pagetable_t
@@ -45,7 +52,7 @@ kvmmake(void)
 
   // allocate and map a kernel stack for each process.
   proc_mapstacks(kpgtbl);
-  
+
   return kpgtbl;
 }
 
@@ -147,7 +154,7 @@ mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 
   if(size == 0)
     panic("mappages: size");
-  
+
   a = PGROUNDDOWN(va);
   last = PGROUNDDOWN(va + size - 1);
   for(;;){
@@ -185,7 +192,43 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not a leaf");
     if(do_free){
       uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+
+      int nf_flag = 0; // if nf_flag is 1, don't free physical frame
+      // do not free if merged page
+      #ifdef SNU
+
+      // check zeropage
+      if (pa == (uint64)zeropage)
+      {
+        --zp_refcnt;
+        // printf("%p(%p): freed, but not freed. zp_refcnt: %d\n", *pte, pa, zp_refcnt);
+        *pte = 0;
+        continue ;
+      }
+
+      // check nonzeropage
+      for (int i = 0; i < NMLIST; i++)
+      {
+        if (mlist[i].refcnt == 0)
+          continue;
+        if (pa == mlist[i].pa)
+        {
+          if (pte == mlist[i].pte)
+            mlist[i].pte = 0;
+
+          --(mlist[i].refcnt);
+          *pte = 0;
+          if (mlist[i].refcnt > 0)
+          {
+            // printf("%p(%p): freed, but not freed. refcnt: %d\n", *pte, pa, mlist[i].refcnt);
+            nf_flag = 1;
+            break ;
+          }
+        }
+      }
+      #endif
+      if (!nf_flag)
+        kfree((void*)pa);
     }
     *pte = 0;
   }
@@ -338,7 +381,7 @@ void
 uvmclear(pagetable_t pagetable, uint64 va)
 {
   pte_t *pte;
-  
+
   pte = walk(pagetable, va, 0);
   if(pte == 0)
     panic("uvmclear");
