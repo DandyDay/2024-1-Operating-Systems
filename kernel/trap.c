@@ -10,11 +10,6 @@
 struct spinlock tickslock;
 uint ticks;
 
-// // #ifdef SNU
-// extern struct merged_page_list mlist[NMLIST];
-// extern struct merged_page_list zeropage;
-// // #endif
-
 extern char trampoline[], uservec[], userret[];
 
 // in kernelvec.S, calls kerneltrap().
@@ -108,6 +103,8 @@ usertrap(void)
     // copy page
     memmove((void *)new_page, (void *)mp->pa, PGSIZE);
     --(mp->refcnt);
+    if (mp != &zeropage && mp->refcnt == 0)
+      kfree((void *)PTE2PA(*pte));
     *pte = PA2PTE(new_page) | (PTE_FLAGS(*pte) | PTE_W);
   }
   // #endif

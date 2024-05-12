@@ -16,11 +16,6 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
-// #ifdef SNU
-// extern struct merged_page_list zeropage;
-// extern struct merged_page_list mlist[NMLIST];
-// #endif
-
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)

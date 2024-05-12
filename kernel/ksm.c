@@ -60,19 +60,19 @@ merge_zeropage(pte_t *pte, uint64 hash)
   return 0;
 }
 
-static void
-print_mlist(void)
-{
-  printf("---mlist---\n");
-  printf("zeropage : pa->%p, refcnt->%d, hash->%d\n", zeropage, zeropage.refcnt, zeropage.hash);
+// static void
+// print_mlist(void)
+// {
+//   printf("---mlist---\n");
+//   printf("zeropage : pa->%p, refcnt->%d, hash->%d\n", zeropage, zeropage.refcnt, zeropage.hash);
 
-  for (int i = 0; i < NMLIST; i++)
-  {
-    if (mlist[i].refcnt != 0)
-      printf("mlist [%d]: pa->%p, refcnt->%d, hash->%d\n", i, mlist[i].pa, mlist[i].refcnt, mlist[i].hash);
-  }
-  printf("---mlist end---\n");
-}
+//   for (int i = 0; i < NMLIST; i++)
+//   {
+//     if (mlist[i].refcnt != 0)
+//       printf("mlist [%d]: pa->%p, refcnt->%d, hash->%d\n", i, mlist[i].pa, mlist[i].refcnt, mlist[i].hash);
+//   }
+//   printf("---mlist end---\n");
+// }
 
 static void
 update_mlist()
@@ -142,7 +142,7 @@ merge_page(pte_t *pte, uint64 hash)
 uint64
 sys_ksm(void)
 {
-  printf("ksm()\n");
+  // printf("ksm()\n");
   struct proc *pr = myproc();
   struct proc *p;
   pte_t *pte;
@@ -189,7 +189,7 @@ sys_ksm(void)
       ++scanned;
 
       merged += merge_page(pte, hash);
-      printf("scanned pid: %d, va0: %p, pa0: %p, xxh: %d\n", p->pid, va0, PTE2PA(*pte), hash);
+      // printf("scanned pid: %d, va0: %p, pa0: %p, xxh: %d\n", p->pid, va0, PTE2PA(*pte), hash);
 
       va0 += PGSIZE;
     }
@@ -198,9 +198,9 @@ sys_ksm(void)
   // write out scanned and merged to user space
   copyout(pr->pagetable, scanned_usraddr, (char *)&scanned, 4);
   copyout(pr->pagetable, merged_usraddr, (char *)&merged, 4);
-  print_mlist();
+  // print_mlist();
 
-  printf("ksm() end\n");
+  // printf("ksm() end\n");
   return freemem;
 }
 
