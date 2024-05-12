@@ -22,9 +22,7 @@
 extern struct proc proc[NPROC];
 
 struct merged_page_list mlist[NMLIST];
-void *zeropage = 0;
-uint64 zp_refcnt = 0;   //zeropage reference count
-uint64 zp_hash = 0;     //zeropage hash
+struct merged_page_list zeropage;
 
 static int scanned;
 static int merged;
@@ -32,12 +30,12 @@ static int merged;
 static void
 set_zeropage(void)
 {
-  zeropage = kalloc();
-  if (!zeropage)
+  zeropage.pa = (uint64)kalloc();
+  if (!zeropage.pa)
     panic("zeropage mappgng");
-  memset(zeropage, 0, PGSIZE);
-  zp_refcnt = 0;
-  zp_hash = xxh64(zeropage, PGSIZE);
+  memset((void *)zeropage.pa, 0, PGSIZE);
+  zeropage.refcnt = 0;
+  zeropage.hash = xxh64((void *)zeropage.pa, PGSIZE);
 }
 
 // merge zeropage
@@ -48,16 +46,15 @@ static int
 merge_zeropage(pte_t *pte, uint64 hash)
 {
   // if already merged zeropage
-  if ((void *)PTE2PA(*pte) == zeropage)
+  if (PTE2PA(*pte) == zeropage.pa)
     return -1;
 
-  // if zeropage
-  if (hash == zp_hash)
+  // if zeropage, MERGE
+  if (hash == zeropage.hash)
   {
     kfree((void *)PTE2PA(*pte));
-    *pte = PA2PTE(zeropage) | (PTE_FLAGS(*pte) & ~PTE_W); // disable write
-    ++zp_refcnt;
-    ++merged;
+    *pte = PA2PTE(zeropage.pa) | (PTE_FLAGS(*pte) & ~PTE_W); // disable write
+    ++(zeropage.refcnt);
     return 1;
   }
   return 0;
@@ -67,7 +64,7 @@ static void
 print_mlist(void)
 {
   printf("---mlist---\n");
-  printf("zeropage : pa->%p, refcnt->%d, hash->%d\n", zeropage, zp_refcnt, zp_hash);
+  printf("zeropage : pa->%p, refcnt->%d, hash->%d\n", zeropage, zeropage.refcnt, zeropage.hash);
 
   for (int i = 0; i < NMLIST; i++)
   {
@@ -87,17 +84,20 @@ update_mlist()
   }
 }
 
-static void
+// return 1 when merged
+// return 0 when not merged
+static int
 push_mlist(pte_t *pte, uint64 hash)
 {
   for (int i = 0; i < NMLIST; i++)
   {
     if (mlist[i].refcnt > 0 && mlist[i].pa == PTE2PA(*pte)) // if already merged page
-     return;
+     return 0;
   }
 
   for (int i = 0; i < NMLIST; i++)
   {
+    // if merge available, MERGE
     if (mlist[i].refcnt > 0 && mlist[i].hash == hash && mlist[i].pa != PTE2PA(*pte))
     {
       if (mlist[i].refcnt == 1 && mlist[i].pte != 0)
@@ -107,7 +107,7 @@ push_mlist(pte_t *pte, uint64 hash)
       kfree((void *)PTE2PA(*pte));
       *pte = PA2PTE(mlist[i].pa) | (PTE_FLAGS(*pte) & ~PTE_W);
       mlist[i].refcnt++;
-      return ;
+      return 1;
     }
   }
 
@@ -122,13 +122,21 @@ push_mlist(pte_t *pte, uint64 hash)
       break;
     }
   }
+  return 0;
 }
 
-static void
+static int
 merge_page(pte_t *pte, uint64 hash)
 {
-  if (merge_zeropage(pte, hash) == 0)
-    push_mlist(pte, hash);
+  int is_merged = 0;
+
+  is_merged = merge_zeropage(pte, hash);
+  if (is_merged == 1)
+    return 1;
+  else if (is_merged == 0)
+    return push_mlist(pte, hash);
+  else
+    return 0;
 }
 
 uint64
@@ -149,9 +157,11 @@ sys_ksm(void)
   merged = 0;
 
   // if zeropage is not set, set zeropage
-  if (zeropage == 0)
+  if (zeropage.pa == 0)
     set_zeropage();
 
+  // update merged list where refcnt == 1
+  // refcnt == 1 page may have write permission
   update_mlist();
 
   // per process traverse
@@ -178,7 +188,7 @@ sys_ksm(void)
       hash = xxh64((void *)PTE2PA(*pte), PGSIZE);
       ++scanned;
 
-      merge_page(pte, hash);
+      merged += merge_page(pte, hash);
       printf("scanned pid: %d, va0: %p, pa0: %p, xxh: %d\n", p->pid, va0, PTE2PA(*pte), hash);
 
       va0 += PGSIZE;

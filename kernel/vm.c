@@ -16,11 +16,10 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
-#ifdef SNU
-extern void *zeropage;
-extern uint64 zp_refcnt;   //zeropage reference count
-extern struct merged_page_list mlist[NMLIST];
-#endif
+// #ifdef SNU
+// extern struct merged_page_list zeropage;
+// extern struct merged_page_list mlist[NMLIST];
+// #endif
 
 // Make a direct-map page table for the kernel.
 pagetable_t
@@ -195,13 +194,13 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
       int nf_flag = 0; // if nf_flag is 1, don't free physical frame
       // do not free if merged page
-      #ifdef SNU
+      // #ifdef SNU
 
       // check zeropage
-      if (pa == (uint64)zeropage)
+      if (pa == (uint64)zeropage.pa)
       {
-        --zp_refcnt;
-        // printf("%p(%p): freed, but not freed. zp_refcnt: %d\n", *pte, pa, zp_refcnt);
+        --(zeropage.refcnt);
+        // printf("%p(%p): freed, but not freed. zp_refcnt: %d\n", *pte, pa, zeropage.refcnt);
         *pte = 0;
         continue ;
       }
@@ -226,7 +225,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
           }
         }
       }
-      #endif
+      // #endif
       if (!nf_flag)
         kfree((void*)pa);
     }

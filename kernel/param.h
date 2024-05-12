@@ -13,5 +13,5 @@
 #define MAXPATH      128   // maximum file path name
 
 // #ifdef SNU
-#define NMLIST 1024 // move to params.h
+#define NMLIST 1024      // maximum number of merged list for KSM(Kernel Samepage Merging)
 // #endif

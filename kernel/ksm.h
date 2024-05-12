@@ -25,4 +25,7 @@ struct merged_page_list {
   uint64 hash;
 };
 
+extern struct merged_page_list zeropage;
+extern struct merged_page_list mlist[NMLIST];
+
 // #endif

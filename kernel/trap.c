@@ -5,9 +5,15 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "ksm.h"
 
 struct spinlock tickslock;
 uint ticks;
+
+// // #ifdef SNU
+// extern struct merged_page_list mlist[NMLIST];
+// extern struct merged_page_list zeropage;
+// // #endif
 
 extern char trampoline[], uservec[], userret[];
 
@@ -46,10 +52,10 @@ usertrap(void)
   w_stvec((uint64)kernelvec);
 
   struct proc *p = myproc();
-  
+
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
+
   if(r_scause() == 8){
     // system call
 
@@ -67,7 +73,45 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
+  }
+  // #ifdef SNU
+  // store page fault (checking CoW required)
+  else if (r_scause() == 0x0f) {
+    uint64 va = r_stval();
+    uint64 va0 = PGROUNDDOWN(va);
+    pte_t *pte = walk(p->pagetable, va0, 0);
+    uint64 pa0 = PTE2PA(*pte);
+    struct merged_page_list *mp = 0;
+
+    if (pa0 == zeropage.pa)
+      mp = &zeropage;
+    else {
+      for (int i = 0; i < NMLIST; i++)
+      {
+        if (mlist[i].refcnt > 0 && mlist[i].pa == pa0)
+          mp = &mlist[i];
+      }
+    }
+
+    // Real page fault
+    if (mp == 0)
+    {
+      printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      setkilled(p);
+    }
+
+    // make new page
+    uint64 new_page = (uint64)kalloc();
+    if (!new_page)
+      panic("CoW kalloc");
+    // copy page
+    memmove((void *)new_page, (void *)mp->pa, PGSIZE);
+    --(mp->refcnt);
+    *pte = PA2PTE(new_page) | (PTE_FLAGS(*pte) | PTE_W);
+  }
+  // #endif
+  else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     setkilled(p);
@@ -109,7 +153,7 @@ usertrapret(void)
 
   // set up the registers that trampoline.S's sret will use
   // to get to user space.
-  
+
   // set S Previous Privilege mode to User.
   unsigned long x = r_sstatus();
   x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
@@ -122,7 +166,7 @@ usertrapret(void)
   // tell trampoline.S the user page table to switch to.
   uint64 satp = MAKE_SATP(p->pagetable);
 
-  // jump to userret in trampoline.S at the top of memory, which 
+  // jump to userret in trampoline.S at the top of memory, which
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
   uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
@@ -131,20 +175,21 @@ usertrapret(void)
 
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
-void 
+void
 kerneltrap()
 {
   int which_dev = 0;
   uint64 sepc = r_sepc();
   uint64 sstatus = r_sstatus();
   uint64 scause = r_scause();
-  
+
   if((sstatus & SSTATUS_SPP) == 0)
     panic("kerneltrap: not from supervisor mode");
   if(intr_get() != 0)
     panic("kerneltrap: interrupts enabled");
 
   if((which_dev = devintr()) == 0){
+    printf("pid: %d\n", myproc()->pid);
     printf("scause %p\n", scause);
     printf("sepc=%p stval=%p\n", r_sepc(), r_stval());
     panic("kerneltrap");
@@ -208,7 +253,7 @@ devintr()
     if(cpuid() == 0){
       clockintr();
     }
-    
+
     // acknowledge the software interrupt by clearing
     // the SSIP bit in sip.
     w_sip(r_sip() & ~2);
