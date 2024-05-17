@@ -207,7 +207,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
           continue;
         if (pa == mlist[i].pa)
         {
-          if (pte == mlist[i].pte)
+          if (pte == mlist[i].pte)  // *
             mlist[i].pte = 0;
 
           --(mlist[i].refcnt);

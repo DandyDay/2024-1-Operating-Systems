@@ -18,11 +18,14 @@ extern int freemem;
 
 uint64 xxh64(void *input, unsigned int len);
 
+void update_mlist();
+
 struct merged_page_list {
   pte_t  *pte;
   uint64 pa;
-  uint64 refcnt;
   uint64 hash;
+  uint32 refcnt;
+  uint32 merged;
 };
 
 extern struct merged_page_list zeropage;

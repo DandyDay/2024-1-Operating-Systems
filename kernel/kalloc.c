@@ -8,6 +8,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
+#include "ksm.h"
 
 void freerange(void *pa_start, void *pa_end);
 
@@ -38,6 +39,15 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
+
+  zeropage.pa = (uint64)p;
+  memset((void *)zeropage.pa, 0, PGSIZE);
+  zeropage.hash = xxh64((void *)zeropage.pa, PGSIZE);
+  zeropage.pte = 0;
+  zeropage.refcnt = 0;
+
+  p += PGSIZE;
+
   for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
     kfree(p);
 }

@@ -95,17 +95,22 @@ usertrap(void)
       printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
       setkilled(p);
     }
-
-    // make new page
-    uint64 new_page = (uint64)kalloc();
-    if (!new_page)
-      panic("CoW kalloc");
-    // copy page
-    memmove((void *)new_page, (void *)mp->pa, PGSIZE);
-    --(mp->refcnt);
-    if (mp != &zeropage && mp->refcnt == 0)
-      kfree((void *)PTE2PA(*pte));
-    *pte = PA2PTE(new_page) | (PTE_FLAGS(*pte) | PTE_W);
+    else
+    {
+      // make new page
+      uint64 new_page = (uint64)kalloc();
+      if (!new_page)
+        panic("CoW kalloc");
+      // copy page
+      memmove((void *)new_page, (void *)mp->pa, PGSIZE);
+      --(mp->refcnt);
+      if (mp != &zeropage && mp->refcnt == 0)
+        kfree((void *)PTE2PA(*pte));
+      if (*pte & (1L << 8)) // has write permission
+        *pte = (PA2PTE(new_page) | (PTE_FLAGS(*pte) | PTE_W)) & (~(1L << 8));
+      else
+        *pte = PA2PTE(new_page) | (PTE_FLAGS(*pte));
+    }
   }
   // #endif
   else {
