@@ -21,8 +21,8 @@
 
 extern struct proc proc[NPROC];
 
-struct merged_page_list mlist[NMLIST];
-struct merged_page_list zeropage;
+struct merged_page mlist[NMLIST];
+struct merged_page zeropage;
 
 // static global variable used for sys_ksm() return
 static int scanned;
@@ -88,7 +88,7 @@ update_mlist()
   for (int i = 0; i < NMLIST; i++)
   {
     if (mlist[i].refcnt == 1 && !mlist[i].merged)
-      memset(&mlist[i], 0, sizeof(struct merged_page_list));
+      memset(&mlist[i], 0, sizeof(struct merged_page));
   }
 }
 

@@ -76,7 +76,7 @@ usertrap(void)
     uint64 va0 = PGROUNDDOWN(va);
     pte_t *pte = walk(p->pagetable, va0, 0);
     uint64 pa0 = PTE2PA(*pte);
-    struct merged_page_list *mp = 0;
+    struct merged_page *mp = 0;
 
     if (pa0 == zeropage.pa)
       mp = &zeropage;

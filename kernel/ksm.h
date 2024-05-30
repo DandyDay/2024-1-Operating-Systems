@@ -20,7 +20,7 @@ uint64 xxh64(void *input, unsigned int len);
 
 void update_mlist();
 
-struct merged_page_list {
+struct merged_page {
   pte_t  *pte;
   uint64 pa;
   uint64 hash;
@@ -28,7 +28,7 @@ struct merged_page_list {
   uint32 merged;
 };
 
-extern struct merged_page_list zeropage;
-extern struct merged_page_list mlist[NMLIST];
+extern struct merged_page zeropage;
+extern struct merged_page mlist[NMLIST];
 
 // #endif
