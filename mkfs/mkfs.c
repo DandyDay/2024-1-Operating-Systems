@@ -22,12 +22,17 @@
 
 // Disk layout:
 // [ boot block | sb block | log | inode blocks | free bit map | data blocks ]
+// if SNU
+// [ boot block | sb block | log | FAT blocks | inode blocks | data blocks ]
 
 int nbitmap = FSSIZE/(BSIZE*8) + 1;
 int ninodeblocks = NINODES / IPB + 1;
 int nlog = LOGSIZE;
 int nmeta;    // Number of meta blocks (boot, sb, nlog, inode, bitmap)
 int nblocks;  // Number of data blocks
+#ifdef SNU
+int nFAT = (FSSIZE * 4) / BSIZE + 1;
+#endif
 
 int fsfd;
 struct superblock sb;
@@ -93,29 +98,53 @@ main(int argc, char *argv[])
     die(argv[1]);
 
   // 1 fs block = 1 disk sector
+  #ifdef SNU
+  nmeta = 2 + nlog + nFAT + ninodeblocks;
+  #else
   nmeta = 2 + nlog + ninodeblocks + nbitmap;
+  #endif
   nblocks = FSSIZE - nmeta;
 
+  #ifdef SNU
+  sb.magic = FSMAGIC_FATTY;
+  #else
   sb.magic = FSMAGIC;
+  #endif
   sb.size = xint(FSSIZE);
   sb.nblocks = xint(nblocks);
   sb.ninodes = xint(NINODES);
   sb.nlog = xint(nlog);
   sb.logstart = xint(2);
+  #ifdef SNU
+  sb.nfat = xint(nFAT);
+  sb.fatstart = xint(2+nlog);
+  sb.inodestart = xint(2+nlog+nFAT);
+  sb.freehead = xint(2+nlog+nFAT+ninodeblocks);
+  sb.freeblks = xint(nblocks);
+
+  printf("nmeta %d (boot, super, log blocks %u fat blocks %u, inode blocks %u) blocks %d total %d\n",
+         nmeta, nlog, nFAT, ninodeblocks, nblocks, FSSIZE);
+
+  #else
   sb.inodestart = xint(2+nlog);
   sb.bmapstart = xint(2+nlog+ninodeblocks);
 
   printf("nmeta %d (boot, super, log blocks %u inode blocks %u, bitmap blocks %u) blocks %d total %d\n",
          nmeta, nlog, ninodeblocks, nbitmap, nblocks, FSSIZE);
+  #endif
 
   freeblock = nmeta;     // the first free block that we can allocate
 
   for(i = 0; i < FSSIZE; i++)
     wsect(i, zeroes);
 
+  #ifdef SNU
+  balloc(freeblock);
+  #else
   memset(buf, 0, sizeof(buf));
   memmove(buf, &sb, sizeof(sb));
   wsect(1, buf);
+  #endif
 
   rootino = ialloc(T_DIR);
   assert(rootino == ROOTINO);
@@ -137,7 +166,7 @@ main(int argc, char *argv[])
       shortname = argv[i] + 5;
     else
       shortname = argv[i];
-    
+
     assert(index(shortname, '/') == 0);
 
     if((fd = open(argv[i], 0)) < 0)
@@ -170,7 +199,13 @@ main(int argc, char *argv[])
   din.size = xint(off);
   winode(rootino, &din);
 
+  #ifdef SNU
+  memset(buf, 0, sizeof(buf));
+  memmove(buf, &sb, sizeof(sb));
+  wsect(1, buf);
+  #else
   balloc(freeblock);
+  #endif
 
   exit(0);
 }
@@ -237,6 +272,23 @@ ialloc(ushort type)
 void
 balloc(int used)
 {
+  #ifdef SNU
+  uint buf[BSIZE * nFAT / sizeof(uint)];
+  int i;
+
+  printf("balloc: first %d blocks have been allocated\n", used);
+  bzero(buf, BSIZE * nFAT);
+  for(i = 0; i < used; i++){
+    buf[i] = xint(-1);
+  }
+  for(i = used; i < FSSIZE; i++){
+    buf[i] = xint(i+1);
+  }
+  printf("balloc: write %d fat blocks at sector %d\n", sb.nfat, sb.fatstart);
+  for(i = 0; i < nFAT; i++){
+    wsect(sb.fatstart + i, buf + (i*BSIZE/sizeof(uint)));
+  }
+  #else
   uchar buf[BSIZE];
   int i;
 
@@ -248,22 +300,108 @@ balloc(int used)
   }
   printf("balloc: write bitmap block at sector %d\n", sb.bmapstart);
   wsect(sb.bmapstart, buf);
+  #endif
 }
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 
+#ifdef SNU
+uint inum2fat(uint inum)
+{
+  uint buf[BSIZE / sizeof(uint)];
+  uint bn = inum / (BSIZE / sizeof(uint));
+  uint off = inum % (BSIZE / sizeof(uint));
+  uint blk = sb.fatstart + bn;
+
+  rsect(blk, buf);
+  uint fat = buf[off];
+  // printf("requested inum: %u, fat: %u\n", inum, fat);
+  return fat;
+}
+
+uint getfreeblk(uint prevblk){
+  uint buf[BSIZE / sizeof(uint)];
+  uint bn = sb.freehead / (BSIZE / sizeof(uint));
+  uint off = sb.freehead % (BSIZE / sizeof(uint));
+  uint blk = sb.fatstart + bn;
+
+
+  // printf("bn: %u, off: %u, blk: %u, inum: %x\n", bn, off, blk, sb.freehead);
+  rsect(blk, buf);
+  // printf("buf:");
+  // for (int i = 0; i < BSIZE/4; i++)
+  //   printf("%x ", buf[i]);
+  // printf("\n");
+  uint freeblk = sb.freehead;
+  sb.freehead = buf[off];
+  buf[off] = 0;
+
+  if (prevblk)
+  {
+    uint pbn = prevblk / (BSIZE / sizeof(uint));
+    uint poff = prevblk % (BSIZE / sizeof(uint));
+    uint pblk = sb.fatstart + pbn;
+    if (blk == pblk){
+      buf[poff] = freeblk;
+      wsect(blk, buf);
+    }
+    else {
+      wsect(blk, buf);
+      rsect(pblk, buf);
+      buf[poff] = freeblk;
+      wsect(pblk, buf);
+    }
+  }
+  else
+    wsect(blk, buf);
+  --sb.freeblks;
+  return freeblk;
+}
+#endif
+
 void
 iappend(uint inum, void *xp, int n)
 {
+  // printf("iappend inum:%d, xp:%p, n:%d\n", inum, xp, n);
   char *p = (char*)xp;
   uint fbn, off, n1;
   struct dinode din;
   char buf[BSIZE];
-  uint indirect[NINDIRECT];
   uint x;
+  uint fat;
 
   rinode(inum, &din);
   off = xint(din.size);
+
+  #ifdef SNU
+  while(n > 0){
+    if(xint(din.startblk) == 0){
+      din.startblk = getfreeblk(0);
+    }
+    fbn = off / BSIZE;
+    x = xint(din.startblk);
+    for (int i = 0; i < fbn; i++)
+    {
+      if ((fat = inum2fat(x)) == 0)
+        x = getfreeblk(x);
+      else
+        x = fat;
+    }
+
+    n1 = min(n, BSIZE - (off % BSIZE));
+    rsect(x, buf);
+    bcopy(p, buf + (off % BSIZE), n1);
+    wsect(x, buf);
+    // printf("writed %d characters on %p\n", n1, buf + (off % BSIZE));
+    n -= n1;
+    off += n1;
+    // printf("remaining n: %u\n", n);
+  }
+  din.size = xint(off);
+  winode(inum, &din);
+  #else
+  uint indirect[NINDIRECT];
+
   // printf("append inum %d at off %d sz %d\n", inum, off, n);
   while(n > 0){
     fbn = off / BSIZE;
@@ -294,6 +432,7 @@ iappend(uint inum, void *xp, int n)
   }
   din.size = xint(off);
   winode(inum, &din);
+  #endif
 }
 
 void
