@@ -24,7 +24,10 @@
 #define min(a, b) ((a) < (b) ? (a) : (b))
 // there should be one superblock per disk device, but we run with
 // only one device
-struct superblock sb; 
+struct superblock sb;
+
+struct sleeplock sblock;
+int VERBOSE = 0;
 
 // Read the super block.
 static void
@@ -41,8 +44,13 @@ readsb(int dev, struct superblock *sb)
 void
 fsinit(int dev) {
   readsb(dev, &sb);
+  #ifdef SNU
+  if(sb.magic != FSMAGIC_FATTY)
+    panic("invalid file system");
+  #else
   if(sb.magic != FSMAGIC)
     panic("invalid file system");
+  #endif
   initlog(dev, &sb);
 }
 
@@ -65,6 +73,31 @@ bzero(int dev, int bno)
 static uint
 balloc(uint dev)
 {
+  if (VERBOSE)
+    printf("balloc dev:%d\n", dev);
+  #ifdef SNU
+  struct buf *bp;
+  int m, bn;
+
+  acquiresleep(&sblock);
+  int b = sb.freehead;
+  if (sb.freeblks == 0) {
+    releasesleep(&sblock);
+    printf("balloc: out of blocks\n");
+    return 0;
+  }
+  bp = bread(dev, FBLOCK(b, sb));
+  m = b % FPB;
+  bn = *((int *)bp->data + m); // get next block
+  *((int *)bp->data + m) = 0; // Mark block in use.
+  sb.freehead = bn;
+  --sb.freeblks;
+  log_write(bp);
+  brelse(bp);
+  bzero(dev, b);
+  releasesleep(&sblock);
+  return b;
+  #else
   int b, bi, m;
   struct buf *bp;
 
@@ -85,12 +118,31 @@ balloc(uint dev)
   }
   printf("balloc: out of blocks\n");
   return 0;
+  #endif
 }
 
 // Free a disk block.
 static void
 bfree(int dev, uint b)
 {
+  if (VERBOSE)
+    printf("bfree dev:%d, b:%d\n", dev, b);
+  #ifdef SNU
+  struct buf *bp;
+  int m;
+
+  acquiresleep(&sblock);
+  bp = bread(dev, FBLOCK(b, sb));
+  m = b % FPB;
+  if (*((int *)bp->data + m) == -1)
+    panic("freeing free block");
+  *((int *)bp->data + m) = sb.freehead;
+  sb.freehead = b;
+  ++sb.freeblks;
+  log_write(bp);
+  brelse(bp);
+  releasesleep(&sblock);
+  #else
   struct buf *bp;
   int bi, m;
 
@@ -102,6 +154,7 @@ bfree(int dev, uint b)
   bp->data[bi/8] &= ~m;
   log_write(bp);
   brelse(bp);
+  #endif
 }
 
 // Inodes.
@@ -182,8 +235,9 @@ void
 iinit()
 {
   int i = 0;
-  
+
   initlock(&itable.lock, "itable");
+  initsleeplock(&sblock, "sblock");
   for(i = 0; i < NINODE; i++) {
     initsleeplock(&itable.inode[i].lock, "inode");
   }
@@ -235,7 +289,11 @@ iupdate(struct inode *ip)
   dip->minor = ip->minor;
   dip->nlink = ip->nlink;
   dip->size = ip->size;
+  #ifdef SNU
+  dip->startblk = ip->startblk;
+  #else
   memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
+  #endif
   log_write(bp);
   brelse(bp);
 }
@@ -271,6 +329,7 @@ iget(uint dev, uint inum)
   ip->inum = inum;
   ip->ref = 1;
   ip->valid = 0;
+  ip->startblk = 0;
   release(&itable.lock);
 
   return ip;
@@ -308,7 +367,11 @@ ilock(struct inode *ip)
     ip->minor = dip->minor;
     ip->nlink = dip->nlink;
     ip->size = dip->size;
+    #ifdef SNU
+    ip->startblk = dip->startblk;
+    #else
     memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
+    #endif
     brelse(bp);
     ip->valid = 1;
     if(ip->type == 0)
@@ -382,6 +445,47 @@ iunlockput(struct inode *ip)
 static uint
 bmap(struct inode *ip, uint bn)
 {
+  if (VERBOSE)
+    printf("bmap inode: %d, blk: %d, bn: %d\n", ip->inum, ip->startblk, bn);
+  #ifdef SNU
+  int i = 0;
+  int b = ip->startblk;
+  int bnext;
+  struct buf *bp = 0;
+  uint prevblk = 0;
+
+  if (ip->startblk == 0){
+    ip->startblk = balloc(ip->dev);
+  }
+
+  b = ip->startblk;
+
+  while (i < bn)
+  {
+    if (prevblk != FBLOCK(b, sb))
+    {
+      if (bp)
+        brelse(bp);
+      bp = bread(ip->dev, FBLOCK(b, sb));
+      prevblk = FBLOCK(b, sb);
+    }
+    bnext = *((int *)bp->data + b % FPB);
+    if (bnext == 0){
+      brelse(bp);
+      bnext = balloc(ip->dev);
+      bp = bread(ip->dev, prevblk);
+      if (bnext == 0)
+        return 0;
+      *((int *)bp->data + b % FPB) = bnext;
+      log_write(bp);
+    }
+    b = bnext;
+    i++;
+  }
+  if (bp)
+    brelse(bp);
+  return b;
+  #else
   uint addr, *a;
   struct buf *bp;
 
@@ -418,6 +522,7 @@ bmap(struct inode *ip, uint bn)
   }
 
   panic("bmap: out of range");
+  #endif
 }
 
 // Truncate inode (discard contents).
@@ -425,6 +530,23 @@ bmap(struct inode *ip, uint bn)
 void
 itrunc(struct inode *ip)
 {
+  #ifdef SNU
+  uint b = ip->startblk;
+  uint bnext;
+  struct buf *bp = 0;
+  // uint prevblk = 0;
+  while (b)
+  {
+    bp = bread(ip->dev, FBLOCK(b, sb));
+    bnext = *((int *)bp->data + b % FPB);
+    brelse(bp);
+    bfree(ip->dev, b);
+    b = bnext;
+  }
+  ip->startblk = 0;
+  ip->size = 0;
+  iupdate(ip);
+  #else
   int i, j;
   struct buf *bp;
   uint *a;
@@ -450,6 +572,7 @@ itrunc(struct inode *ip)
 
   ip->size = 0;
   iupdate(ip);
+  #endif
 }
 
 // Copy stat information from inode.
@@ -471,6 +594,8 @@ stati(struct inode *ip, struct stat *st)
 int
 readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 {
+  if (VERBOSE)
+    printf("readi called\n");
   uint tot, m;
   struct buf *bp;
 
@@ -525,6 +650,8 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
     }
     log_write(bp);
     brelse(bp);
+    if (VERBOSE)
+      printf("write inode:%d tot: %d, n: %d, m: %d\n", ip->inum, tot, n, m);
   }
 
   if(off > ip->size)

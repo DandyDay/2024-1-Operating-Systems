@@ -2,6 +2,9 @@
 // Both the kernel and user programs use this header file.
 
 
+#ifndef SNU
+#define SNU
+#endif
 #define ROOTINO  1   // root i-number
 #define BSIZE 1024  // block size
 
@@ -61,8 +64,15 @@ struct dinode {
 // Bitmap bits per block
 #define BPB           (BSIZE*8)
 
+// FAT element per block (32bit = 4byte per element)
+#define FPB           (BSIZE/4)
+
 // Block of free map containing bit for block b
+#ifdef SNU
+#define FBLOCK(b, sb) ((b)/FPB + sb.fatstart)
+#else
 #define BBLOCK(b, sb) ((b)/BPB + sb.bmapstart)
+#endif
 
 // Directory is a file containing a sequence of dirent structures.
 #define DIRSIZ 14
