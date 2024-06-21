@@ -27,6 +27,8 @@
 struct superblock sb;
 
 struct sleeplock sblock;
+struct buf *cachedbuf;
+uint cachedblk;
 int VERBOSE = 0;
 
 // Read the super block.
@@ -45,6 +47,7 @@ void
 fsinit(int dev) {
   readsb(dev, &sb);
   #ifdef SNU
+  cachedblk = 0;
   if(sb.magic != FSMAGIC_FATTY)
     panic("invalid file system");
   #else
@@ -73,8 +76,6 @@ bzero(int dev, int bno)
 static uint
 balloc(uint dev)
 {
-  if (VERBOSE)
-    printf("balloc dev:%d\n", dev);
   #ifdef SNU
   struct buf *bp;
   int m, bn;
@@ -122,40 +123,38 @@ balloc(uint dev)
 }
 
 // Free a disk block.
-static void
-bfree(int dev, uint b)
-{
-  if (VERBOSE)
-    printf("bfree dev:%d, b:%d\n", dev, b);
-  #ifdef SNU
-  struct buf *bp;
-  int m;
+// static void
+// bfree(int dev, uint b)
+// {
+//   #ifdef SNU
+//   struct buf *bp;
+//   int m;
 
-  acquiresleep(&sblock);
-  bp = bread(dev, FBLOCK(b, sb));
-  m = b % FPB;
-  if (*((int *)bp->data + m) == -1)
-    panic("freeing free block");
-  *((int *)bp->data + m) = sb.freehead;
-  sb.freehead = b;
-  ++sb.freeblks;
-  log_write(bp);
-  brelse(bp);
-  releasesleep(&sblock);
-  #else
-  struct buf *bp;
-  int bi, m;
+//   acquiresleep(&sblock);
+//   bp = bread(dev, FBLOCK(b, sb));
+//   m = b % FPB;
+//   if (*((int *)bp->data + m) == -1)
+//     panic("freeing free block");
+//   *((int *)bp->data + m) = sb.freehead;
+//   sb.freehead = b;
+//   ++sb.freeblks;
+//   log_write(bp);
+//   brelse(bp);
+//   releasesleep(&sblock);
+//   #else
+//   struct buf *bp;
+//   int bi, m;
 
-  bp = bread(dev, BBLOCK(b, sb));
-  bi = b % BPB;
-  m = 1 << (bi % 8);
-  if((bp->data[bi/8] & m) == 0)
-    panic("freeing free block");
-  bp->data[bi/8] &= ~m;
-  log_write(bp);
-  brelse(bp);
-  #endif
-}
+//   bp = bread(dev, BBLOCK(b, sb));
+//   bi = b % BPB;
+//   m = 1 << (bi % 8);
+//   if((bp->data[bi/8] & m) == 0)
+//     panic("freeing free block");
+//   bp->data[bi/8] &= ~m;
+//   log_write(bp);
+//   brelse(bp);
+//   #endif
+// }
 
 // Inodes.
 //
@@ -253,12 +252,24 @@ struct inode*
 ialloc(uint dev, short type)
 {
   int inum;
-  struct buf *bp;
+  struct buf *bp = 0;
   struct dinode *dip;
+  uint prevblk = 0;
 
   for(inum = 1; inum < sb.ninodes; inum++){
-    bp = bread(dev, IBLOCK(inum, sb));
+    if (prevblk != IBLOCK(inum, sb))
+    {
+      if (bp)
+        brelse(bp);
+      bp = bread(dev, IBLOCK(inum, sb));
+      prevblk = IBLOCK(inum, sb);
+    }
     dip = (struct dinode*)bp->data + inum%IPB;
+    if (IBLOCK(inum, sb) == cachedblk)
+    {
+      cachedbuf = 0;
+      cachedblk = 0;
+    }
     if(dip->type == 0){  // a free inode
       memset(dip, 0, sizeof(*dip));
       dip->type = type;
@@ -266,8 +277,9 @@ ialloc(uint dev, short type)
       brelse(bp);
       return iget(dev, inum);
     }
-    brelse(bp);
   }
+  if (bp)
+    brelse(bp);
   printf("ialloc: no inodes\n");
   return 0;
 }
@@ -445,8 +457,6 @@ iunlockput(struct inode *ip)
 static uint
 bmap(struct inode *ip, uint bn)
 {
-  if (VERBOSE)
-    printf("bmap inode: %d, blk: %d, bn: %d\n", ip->inum, ip->startblk, bn);
   #ifdef SNU
   int i = 0;
   int b = ip->startblk;
@@ -473,9 +483,9 @@ bmap(struct inode *ip, uint bn)
     if (bnext == 0){
       brelse(bp);
       bnext = balloc(ip->dev);
-      bp = bread(ip->dev, prevblk);
       if (bnext == 0)
         return 0;
+      bp = bread(ip->dev, prevblk);
       *((int *)bp->data + b % FPB) = bnext;
       log_write(bp);
     }
@@ -534,14 +544,34 @@ itrunc(struct inode *ip)
   uint b = ip->startblk;
   uint bnext;
   struct buf *bp = 0;
-  // uint prevblk = 0;
+  uint prevblk = 0;
   while (b)
   {
-    bp = bread(ip->dev, FBLOCK(b, sb));
+    if (prevblk != FBLOCK(b, sb))
+    {
+      if (bp)
+      {
+        releasesleep(&sblock);
+        brelse(bp);
+      }
+      acquiresleep(&sblock);
+      bp = bread(ip->dev, FBLOCK(b, sb));
+      prevblk = FBLOCK(b, sb);
+    }
     bnext = *((int *)bp->data + b % FPB);
-    brelse(bp);
-    bfree(ip->dev, b);
+    // free block
+    int m = b % FPB;
+    *((int *)bp->data + m) = sb.freehead;
+    sb.freehead = b;
+    ++sb.freeblks;
+    log_write(bp);
+    // bfree(ip->dev, b);
     b = bnext;
+  }
+  if (bp)
+  {
+    releasesleep(&sblock);
+    brelse(bp);
   }
   ip->startblk = 0;
   ip->size = 0;
@@ -594,8 +624,6 @@ stati(struct inode *ip, struct stat *st)
 int
 readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 {
-  if (VERBOSE)
-    printf("readi called\n");
   uint tot, m;
   struct buf *bp;
 
@@ -608,14 +636,24 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
     uint addr = bmap(ip, off/BSIZE);
     if(addr == 0)
       break;
-    bp = bread(ip->dev, addr);
+    if (addr == cachedblk)
+    {
+      bp = cachedbuf;
+    }
+    else
+    {
+      bp = bread(ip->dev, addr);
+      cachedbuf = bp;
+      cachedblk = addr;
+      brelse(bp);
+    }
     m = min(n - tot, BSIZE - off%BSIZE);
     if(either_copyout(user_dst, dst, bp->data + (off % BSIZE), m) == -1) {
-      brelse(bp);
+      // brelse(bp);
       tot = -1;
       break;
     }
-    brelse(bp);
+    // brelse(bp);
   }
   return tot;
 }
@@ -642,6 +680,11 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
     uint addr = bmap(ip, off/BSIZE);
     if(addr == 0)
       break;
+    if (addr == cachedblk)  // reset cache
+    {
+      cachedbuf = 0;
+      cachedblk = 0;
+    }
     bp = bread(ip->dev, addr);
     m = min(n - tot, BSIZE - off%BSIZE);
     if(either_copyin(bp->data + (off % BSIZE), user_src, src, m) == -1) {
@@ -650,8 +693,6 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
     }
     log_write(bp);
     brelse(bp);
-    if (VERBOSE)
-      printf("write inode:%d tot: %d, n: %d, m: %d\n", ip->inum, tot, n, m);
   }
 
   if(off > ip->size)
@@ -828,5 +869,6 @@ void
 fsinfo(void)
 {
   printf("Free blocks: %d\n", sb.freeblks);
+  printf("Free head: %p\n", sb.freehead);
 }
 #endif
