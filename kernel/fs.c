@@ -26,10 +26,16 @@
 // only one device
 struct superblock sb;
 
+#ifdef SNU
+#define nFAT ((FSSIZE * 4) / BSIZE + 1)
 struct sleeplock sblock;
 struct buf *cachedbuf;
 uint cachedblk;
-int VERBOSE = 0;
+struct fatblock {
+  struct spinlock lock;
+  uint fat[BSIZE / 4];
+} fatblks[nFAT];
+#endif
 
 // Read the super block.
 static void
@@ -47,9 +53,16 @@ void
 fsinit(int dev) {
   readsb(dev, &sb);
   #ifdef SNU
-  cachedblk = 0;
   if(sb.magic != FSMAGIC_FATTY)
     panic("invalid file system");
+  cachedblk = 0;
+  for (int i = 0; i < nFAT; i++)
+  {
+    struct buf* bp = bread(dev, sb.fatstart + i);
+    memmove(&fatblks[i].fat, bp->data, BSIZE);
+    brelse(bp);
+    initlock(&fatblks[i].lock, "fatlock");
+  }
   #else
   if(sb.magic != FSMAGIC)
     panic("invalid file system");
@@ -77,7 +90,6 @@ static uint
 balloc(uint dev)
 {
   #ifdef SNU
-  struct buf *bp;
   int m, bn;
 
   acquiresleep(&sblock);
@@ -87,14 +99,14 @@ balloc(uint dev)
     printf("balloc: out of blocks\n");
     return 0;
   }
-  bp = bread(dev, FBLOCK(b, sb));
+  uint fatidx = FBLOCK(b, sb) - sb.fatstart;
   m = b % FPB;
-  bn = *((int *)bp->data + m); // get next block
-  *((int *)bp->data + m) = 0; // Mark block in use.
+  acquire(&fatblks[fatidx].lock);
+  bn = fatblks[fatidx].fat[m]; // get next block
+  fatblks[fatidx].fat[m] = 0; // Mark block in use.
+  release(&fatblks[fatidx].lock);
   sb.freehead = bn;
   --sb.freeblks;
-  log_write(bp);
-  brelse(bp);
   bzero(dev, b);
   releasesleep(&sblock);
   return b;
@@ -121,40 +133,6 @@ balloc(uint dev)
   return 0;
   #endif
 }
-
-// Free a disk block.
-// static void
-// bfree(int dev, uint b)
-// {
-//   #ifdef SNU
-//   struct buf *bp;
-//   int m;
-
-//   acquiresleep(&sblock);
-//   bp = bread(dev, FBLOCK(b, sb));
-//   m = b % FPB;
-//   if (*((int *)bp->data + m) == -1)
-//     panic("freeing free block");
-//   *((int *)bp->data + m) = sb.freehead;
-//   sb.freehead = b;
-//   ++sb.freeblks;
-//   log_write(bp);
-//   brelse(bp);
-//   releasesleep(&sblock);
-//   #else
-//   struct buf *bp;
-//   int bi, m;
-
-//   bp = bread(dev, BBLOCK(b, sb));
-//   bi = b % BPB;
-//   m = 1 << (bi % 8);
-//   if((bp->data[bi/8] & m) == 0)
-//     panic("freeing free block");
-//   bp->data[bi/8] &= ~m;
-//   log_write(bp);
-//   brelse(bp);
-//   #endif
-// }
 
 // Inodes.
 //
@@ -461,8 +439,6 @@ bmap(struct inode *ip, uint bn)
   int i = 0;
   int b = ip->startblk;
   int bnext;
-  struct buf *bp = 0;
-  uint prevblk = 0;
 
   if (ip->startblk == 0){
     ip->startblk = balloc(ip->dev);
@@ -472,28 +448,22 @@ bmap(struct inode *ip, uint bn)
 
   while (i < bn)
   {
-    if (prevblk != FBLOCK(b, sb))
+    uint fatidx = FBLOCK(b, sb) - sb.fatstart;
+    acquire(&fatblks[fatidx].lock);
+    bnext = fatblks[fatidx].fat[b % FPB];
+    if (bnext == 0)
     {
-      if (bp)
-        brelse(bp);
-      bp = bread(ip->dev, FBLOCK(b, sb));
-      prevblk = FBLOCK(b, sb);
-    }
-    bnext = *((int *)bp->data + b % FPB);
-    if (bnext == 0){
-      brelse(bp);
+      release(&fatblks[fatidx].lock);
       bnext = balloc(ip->dev);
       if (bnext == 0)
         return 0;
-      bp = bread(ip->dev, prevblk);
-      *((int *)bp->data + b % FPB) = bnext;
-      log_write(bp);
+      acquire(&fatblks[fatidx].lock);
+      fatblks[fatidx].fat[b % FPB] = bnext;
     }
+    release(&fatblks[fatidx].lock);
     b = bnext;
     i++;
   }
-  if (bp)
-    brelse(bp);
   return b;
   #else
   uint addr, *a;
@@ -543,35 +513,18 @@ itrunc(struct inode *ip)
   #ifdef SNU
   uint b = ip->startblk;
   uint bnext;
-  struct buf *bp = 0;
-  uint prevblk = 0;
   while (b)
   {
-    if (prevblk != FBLOCK(b, sb))
-    {
-      if (bp)
-      {
-        releasesleep(&sblock);
-        brelse(bp);
-      }
-      acquiresleep(&sblock);
-      bp = bread(ip->dev, FBLOCK(b, sb));
-      prevblk = FBLOCK(b, sb);
-    }
-    bnext = *((int *)bp->data + b % FPB);
-    // free block
-    int m = b % FPB;
-    *((int *)bp->data + m) = sb.freehead;
+    uint fatidx = FBLOCK(b, sb) - sb.fatstart;
+    acquiresleep(&sblock);
+    acquire(&fatblks[fatidx].lock);
+    bnext = fatblks[fatidx].fat[b%FPB];
+    fatblks[fatidx].fat[b%FPB] = sb.freehead;
+    release(&fatblks[fatidx].lock);
     sb.freehead = b;
     ++sb.freeblks;
-    log_write(bp);
-    // bfree(ip->dev, b);
-    b = bnext;
-  }
-  if (bp)
-  {
     releasesleep(&sblock);
-    brelse(bp);
+    b = bnext;
   }
   ip->startblk = 0;
   ip->size = 0;
@@ -649,11 +602,9 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
     }
     m = min(n - tot, BSIZE - off%BSIZE);
     if(either_copyout(user_dst, dst, bp->data + (off % BSIZE), m) == -1) {
-      // brelse(bp);
       tot = -1;
       break;
     }
-    // brelse(bp);
   }
   return tot;
 }

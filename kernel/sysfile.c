@@ -505,17 +505,39 @@ sys_pipe(void)
 }
 
 #ifdef SNU
+
+#include "buf.h"
+#define nFAT ((FSSIZE * 4) / BSIZE + 1)
+
+extern struct superblock sb;
+extern struct fatblock {
+  struct spinlock lock;
+  uint fat[BSIZE / 4];
+} fatblks[nFAT];
+
 uint64
 sys_sync(void)
 {
   // FILL HERE
 
+  struct buf *bp;
+
+  // for superblock
+  bp = bread(1, 1);
+  memmove(bp->data, &sb, sizeof(sb));
+  bwrite(bp);
+  brelse(bp);
+
+  //for fat blocks
+  for (int i = 0; i < sb.nfat; i++)
+  {
+    bp = bread(1, sb.fatstart + i);
+    memmove(bp->data, &fatblks[i].fat, BSIZE);
+    bwrite(bp);
+    brelse(bp);
+  }
+
+  // assume always success
   return 0;
-
-
-
-
-
-
 }
 #endif
